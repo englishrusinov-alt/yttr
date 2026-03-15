@@ -1,0 +1,21 @@
+version: '3.8'
+
+services:
+  db:
+    image: postgres:15
+    environment:
+      POSTGRES_USER: user
+      POSTGRES_PASSWORD:  password
+      POSTGRES_DB: ytter_db
+    ports:
+      - "5433:5432"
+  app:
+    build: .
+    ports:
+      - "8000:8000"
+    environment:
+
+        DATABASE_URL:
+          postgresql://user:password@db:5432/ytter_db
+    depends_on:
+      - db
