@@ -1,12 +1,16 @@
 import pytest
 from pydantic import ValidationError
+
 from app.config import SimpleConfig
+
 
 def test_get_settings_success(monkeypatch):
     # Этап 1: Подменяем переменные окружения (monkeypatch.setenv)
     # Нам нужно замокать ВСЕ обязательные поля, чтобы класс собрался.
     # ВАЖНО: monkeypatch работает со строками, поэтому порт передаем как "8080"
-    monkeypatch.setenv("DATABASE_URL", "postgres://test_user:test_pass@localhost:5432/test_db")
+    monkeypatch.setenv(
+        "DATABASE_URL", "postgres://test_user:test_pass@localhost:5432/test_db"
+    )
     monkeypatch.setenv("APP_PORT", "8080")
 
     # Этап 2: Инстанцируем класс конфигурации.
@@ -14,9 +18,12 @@ def test_get_settings_success(monkeypatch):
     settings = SimpleConfig()
 
     # Этап 3: Проверяем (assert), что загрузилось то, что мы передали
-    assert settings.database_url == "postgres://test_user:test_pass@localhost:5432/test_db"
+    assert (
+        settings.database_url == "postgres://test_user:test_pass@localhost:5432/test_db"
+    )
     # Pydantic сам должен был привести "8080" к числу 8080
     assert settings.app_port == 8080
+
 
 def test_get_settings_fail_missing_required_url(monkeypatch):
     # Этап 1: Специально УДАЛЯЕМ обязательную переменную из окружения

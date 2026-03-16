@@ -5,6 +5,7 @@ import app.main as dashboard
 
 def test_dashboard_success():
     client = fastapi.testclient.TestClient(dashboard.app)
+
     response = client.get("/dashboard")
 
     assert response.status_code == 200
