@@ -225,3 +225,61 @@ Taxonomy: [19. Lack of mental model]
  Why: не знал , ruff проверяет не только синтакс,но и pyflake , то есть логику и производительность,если указывать в конфе
    Rule for next time: юзать ruff повседневно to prevent issues
    \n\nT007:\n\nWELL:\n1) Услышал критику, понял разницу в подаче мыслей "от себя" и "для оператора системы".\n\nSTRUGGLE:\n1) Fact: Я забыл указать базовые шаги клонирования и создания .env-конфигурации.\n   Taxonomy: [12. Operational blindness], [15. Curse of knowledge]\n   Why: "Проклятие знания" — раз я уже склонировал репозиторий и создал лог-файл, мой мозг воспринимал это как дефолтное состояние мира. Я не мог посмотреть на проект "пустыми глазами" нового сотрудника (или сервера CI/CD).\n   Rule for next time: При написании README или любой инструкции запуска, я буду мысленно или физически удалять папку проекта и проходить путь с \$HOME, фиксируя каждую bash-команду.
+
+T010:
+
+WELL:
+1) Изменил файл config.py , добавив поля APP_ENV и APP_PORT
+2) Создал тест test_config_validation_fails(monkeypatch): ,
+   где изменил значение порта на строку , pydantic поругал
+
+[BAD] 2) Fact: Закоммитил инструкцию `cp .env.example .env` в README, но сам `.env.example` содержал неправильные поля (`PORT` вместо `APP_PORT`).
+[BAD]    Taxonomy: [2. Modeling error], [10. Serialization or contract error]
+[BAD]    Why: забыл о контракте
+[BAD]    Rule for next time: проверять конфиги на контракты всегда перед разработкой
+
+[BAD] 3) Fact: Оставил глобальную инициализацию `settings = SimpleConfig()` на уровне модуля, что роняло сборку тестов `pytest` еще до их запуска из-за отсутствия переменных окружения.
+[BAD]    Taxonomy: [5. State management error], [11. Testing blindness]
+[BAD]    Why: не знал что там синглтон ставится
+[BAD]    Rule for next time: ставить lru cache где нужно тестить и вызывать с Dependency Injection
+
+[BAD] 4) Fact: Написал незаконченный тест `test_config_validation_fails`, где остановился на `monkeypatch.setenv`, не вызвав сам код и не проверив отлов исключений через `with pytest.raises(ValidationError)`.
+[BAD]    Taxonomy: [11. Testing blindness], [15. Ложная уверенность, вызванная отсутствием верификации]
+[BAD]    Why: Не знал что надо ловить исключения через with
+[BAD]    Rule for next time: юзать with для отлова исключений в тестах
+
+T011
+WELL:
+Я перестал делать внутренние config-классы наследниками SimpleConfig и перевёл их в отдельные dataclass-структуры: AppConfig, DatabaseConfig, SecurityConfig. Это был правильный сдвиг от “всё читает env” к “есть raw loader и есть внутренние формы данных”.
+Я выделил SimpleConfig как единственную точку входа для внешней среды через BaseSettings, а затем добавил builder-функции build_app_config, build_database_config, build_security_config. Это уже соответствует идее transformation raw -> internal shape, а не inheritance.
+Я не остановился на happy path и добавил проверки:
+success/fail тесты для SimpleConfig,
+success-тесты для builder-логики на T011 через заранее собранный SimpleConfig(...).
+Это значит, что я уже начал отделять boundary validation от внутреннего mapping-а.
+Я дошёл до правильной рабочей модели без готового решения с нуля: SimpleConfig читает env, а внутренние конфиги не читают env напрямую. Для новичкового уровня это важный conceptual breakthrough, а не просто синтаксическая правка.
+STRUGGLE:
+Fact: Сначала я пытался сделать AppConfig, DatabaseConfig, SecurityConfig наследниками SimpleConfig, как будто внутренние модели — это “подтипы” env-loader’а.
+Taxonomy: [2. Modeling error]
+Why: Я не различал два слоя: внешний источник конфигурации и внутреннее представление конфигурации в приложении. Мне казалось, что если поля одинаковые, то inheritance “естественен”, хотя по смыслу роли у классов разные.
+Evidence: Только после перехода к отдельным dataclass-моделям и builder-функциям структура стала правильной: SimpleConfig остался BaseSettings, а внутренние модели перестали читать env.
+Rule for next time: Если один класс читает внешний мир, а другой просто хранит уже нормализованные данные, я сначала проверяю отношение “is-a” против “built-from”. Для boundary-объектов и internal-shape-объектов по умолчанию выбирать transformation, а не inheritance.
+Fact: Я несколько раз путал обычные классы с аннотациями, @dataclass и BaseSettings, из-за чего создавал либо пустые оболочки без конструктора, либо классы, которые вели себя не так, как я ожидал.
+Taxonomy: [1. Syntax or API memory error], [12. Operational blindness]
+Why: У меня не было автоматизма на том, что Python-класс с одними аннотациями — это ещё не полноценная runtime-модель, и что BaseSettings сам по себе уже решает другую задачу, чем dataclass.
+Evidence: Builder-функции начали иметь смысл только после того, как внутренние модели стали dataclass’ами с реальными полями, а не пустыми оболочками.
+Rule for next time: Перед созданием нового типа явно писать себе роль: “читает env”, “валидирует API payload”, “просто хранит внутренние данные”. Под каждую роль выбирать один инструмент: BaseSettings, BaseModel или @dataclass, а не смешивать их вслепую.
+Fact: Я долго держал тесты в старой ментальной модели и пытался инстанцировать AppConfig(), DatabaseConfig(), SecurityConfig() так, будто они сами читают env и валидируют окружение.
+Taxonomy: [11. Testing blindness], [2. Modeling error]
+Why: Я изменил архитектуру кода, но не перестроил сразу модель тестирования. В голове всё ещё жил старый паттерн: “любой config-класс читает env”.
+Evidence: Ошибки TypeError: __init__() missing required positional argument и переход к тестам через raw = SimpleConfig(...) показали, что builder-тесты надо писать на transformation, а env-тесты оставлять только для SimpleConfig.
+Rule for next time: После любого архитектурного изменения я отдельно спрашиваю себя: “Что теперь является boundary under test?” Если env читает только один класс, то только он и должен иметь env-driven negative tests.
+Fact: Я путал проблемы текущего тикета с красными тестами из других частей проекта и тратил внимание на шум вокруг health и dashboard, хотя они не были частью T011.
+Taxonomy: [12. Operational blindness]
+Why: Под усталостью я переставал чётко разделять scope тикета и начинал воспринимать “всё красное” как одну проблему.
+Evidence: Даже после того как T011 уже встал на правильные рельсы, в сводке оставались unrelated падения, не относящиеся к конфиг-моделям.
+Rule for next time: При красном тест-ране я сначала группирую падения по подсистемам: config, health, logging, db. Я не позволяю несвязанным красным тестам диктовать оценку текущего тикета.
+Fact: В negative-тестах T011 я всё ещё частично проверял падение SimpleConfig() вместо отдельной логики builder-слоя, поэтому T011 закрыт честно, но не идеально отполирован.
+Taxonomy: [11. Testing blindness]
+Why: Мне было проще продолжать бить по входному слою, чем придумать действительно отдельный негативный случай именно для transformation-уровня.
+Evidence: В текущих T011-тестах success-path уже идёт через SimpleConfig(...) -> build_*, но failure-path по сути ещё завязан на невозможность собрать SimpleConfig().
+Rule for next time: Для многошаговой архитектуры я должен иметь хотя бы по одному тесту на каждый слой: boundary validation отдельно, transformation отдельно, consumer usage отдельно.
