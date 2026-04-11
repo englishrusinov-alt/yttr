@@ -283,3 +283,26 @@ Taxonomy: [11. Testing blindness]
 Why: Мне было проще продолжать бить по входному слою, чем придумать действительно отдельный негативный случай именно для transformation-уровня.
 Evidence: В текущих T011-тестах success-path уже идёт через SimpleConfig(...) -> build_*, но failure-path по сути ещё завязан на невозможность собрать SimpleConfig().
 Rule for next time: Для многошаговой архитектуры я должен иметь хотя бы по одному тесту на каждый слой: boundary validation отдельно, transformation отдельно, consumer usage отдельно.
+
+TO12: 
+
+WELL:
+
+Реализовал utility module с helper-функциями для safe time, UUID и hash.
+Добавил success и failure тесты.
+Удержал scope маленьким и не начал строить лишние классы.
+
+STRUGGLE:
+
+Fact: Сначала не понимал, как правильно работать с UTC datetime и чем aware datetime отличается от naive.
+Taxonomy: [12. Operational blindness]
+Why: Не было ментальной модели безопасной работы со временем в Python.
+Rule for next time: Для времени сначала проверять, timezone-aware ли объект, и по умолчанию выбирать UTC.
+Fact: В тесте на sha256 я написал tuple внутри assert вместо реального сравнения.
+Taxonomy: [1. Syntax or API memory error], [11. Testing blindness]
+Why: Я знал, что хочу сравнить два значения, но ошибся в форме assert-выражения.
+Rule for next time: В каждом assert явно проверять, что там есть булево условие, а не просто набор значений.
+Fact: UUID-тест сначала проверял только тип str, а не реальную валидность UUID.
+Taxonomy: [11. Testing blindness]
+Why: Я проверил поверхностный признак, а не сам контракт helper-функции.
+Rule for next time: Для utility-функций проверять не только тип результата, но и семантическую валидность значения.
