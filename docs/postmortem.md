@@ -306,3 +306,78 @@ Fact: UUID-тест сначала проверял только тип str, а 
 Taxonomy: [11. Testing blindness]
 Why: Я проверил поверхностный признак, а не сам контракт helper-функции.
 Rule for next time: Для utility-функций проверять не только тип результата, но и семантическую валидность значения.
+
+
+T014
+
+WELL:
+
+Реализовал helper’ы для санитаризации имени файла и сборки безопасного пути.
+Написал success и failure тесты на happy path, path stripping и пустое имя.
+Удержал scope тикета маленьким: не полез в upload endpoint, MIME и storage.
+
+STRUGGLE:
+
+Fact: Все 4 теста упали с TypeError: issubclass() arg 1 must be a class.
+Taxonomy: [1. Syntax or API memory error]
+Why: Я, скорее всего, перепутал issubclass(...) и isinstance(...). В boundary-helper’ах я проверял не класс, а обычное значение вроде строки или Path-объекта.
+Rule for next time: Если я валидирую входное значение, по умолчанию сначала думаю про isinstance(value, Type). issubclass использовать только когда у меня реально класс, а не объект.
+Fact: Я написал тест с ожиданием конкретной формы очищенного имени файла, но не до конца сверил это с реальной логикой regex-замены.
+Taxonomy: [10. Serialization or contract error], [11. Testing blindness]
+Why: Я зафиксировал ожидаемый output раньше, чем чётко определил контракт sanitize-функции для символов перед расширением файла.
+Rule for next time: Перед тестом на string transformation я сначала выписываю точный контракт преобразования на 2–3 примерах, и только потом фиксирую assert.
+Fact: Тикет в целом рабочий по идее, но я всё ещё делаю ошибки на уровне маленьких API-деталей Python.
+Taxonomy: [12. Operational blindness]
+Why: Паттерн boundary control я уже понял, но инструментальный слой (Path, regex, isinstance/issubclass`) пока не автоматизирован.
+Rule for next time: После новой концепции я отдельно добиваю микрослой API-инструментов, чтобы не терять время на мелких runtime-ошибках.
+
+
+T015
+
+WELL:
+
+Создал собственную иерархию доменных ошибок с базовым DomainError и узкими наследниками для типовых сценариев.
+Не оставил exception hierarchy “декоративной”, а реально встроил её в file_utils, где sanitize_upload_filename() поднимает InvalidFilenameError на плохом входе.
+Добил тикет до рабочего состояния и проверил его через тесты; финальный test run полностью зелёный.
+
+STRUGGLE:
+
+Fact: Сначала я попытался сделать raise ("filename is empty or invalid"), из-за чего Python упал с TypeError: exceptions must derive from BaseException.
+Taxonomy: [1. Syntax or API memory error]
+Why: Я смешал “сообщение об ошибке” и “объект исключения”. В голове была идея ошибки, но не был автоматизирован правильный Python-способ её поднятия.
+Rule for next time: В Python я всегда поднимаю либо класс исключения, либо его экземпляр, например raise InvalidFilenameError("..."), а не строку.
+Fact: Изначально у меня не было уверенной модели, чем Python exception hierarchy отличается от более Java-подобного layer-based exception style.
+Taxonomy: [2. Modeling error], [12. Operational blindness]
+Why: Я искал аналог DAO/service-style исключений, хотя задача была не про инфраструктурный слой, а про доменные ошибки и error modeling.
+Rule for next time: Для Python-сервисов сначала строю исключения вокруг доменного смысла (InvalidFilenameError, EntityNotFoundError), а не вокруг технических слоёв вроде DAO.
+Fact: Я закрыл тикет не с первого раза, а через маленький runtime-bug и последующую коррекцию.
+Taxonomy: [11. Testing blindness]
+Why: Только тесты и реальный прогон показали, что формально “похоже на exception” ещё не значит “это действительно корректно поднимается как исключение”.
+Rule for next time: После добавления custom exception я сразу делаю минимальный тест на pytest.raises(...), чтобы проверить не только дизайн класса, но и реальное raise-поведение.
+
+T016
+
+WELL:
+
+Понял, что задача не про json, jq или regex-движок, а про маленькую утилиту, которая берёт сырой dict с filter params и приводит его к нормальной форме. Это правильно совпало с целью тикета: parsing and normalization.
+Смог удержать маленький scope: limit, offset, status, sort_order, без ухода в универсальный query engine, ORM-магии и лишнюю архитектуру. Это хороший проход для tiny module.
+Использовал уже созданный InvalidFilterError, то есть связал новый тикет с предыдущим и не стал плодить случайные ошибки без общей иерархии.
+
+STRUGGLE:
+
+Fact: Я сначала вообще не мог придумать логику реализации и застрял, потому что в голове задача расплывалась в что-то слишком общее и абстрактное.
+Taxonomy: [2. Modeling error], [12. Operational blindness]
+Why: Я не увидел минимальную форму задачи и пытался представить “фильтрацию вообще”, а не конкретную нормализацию нескольких параметров.
+Rule for next time: Если задача кажется туманной, я сначала сужаю её до 3–4 конкретных полей и пишу, что приходит на вход и что должно выйти на выходе.
+Fact: Я пытался думать через regex и общий проход по всем элементам, хотя для limit, offset, status, sort_order это не нужно.
+Taxonomy: [12. Operational blindness]
+Why: Я инстинктивно искал “техничный” способ решения до того, как построил простую ментальную модель данных.
+Rule for next time: Для parsing/normalization задач я сначала проверяю, можно ли решить их через явную логику по полям без regex, и только потом думаю о более общих техниках.
+Fact: Я не решил задачу полностью сам с нуля и в итоге переписал предложенное решение после собственной попытки подумать.
+Taxonomy: [15. AI-induced false confidence]
+Why: Моя самостоятельная попытка упёрлась в отсутствие ментальной модели, и без внешнего каркаса я не мог собрать решение в цельный модуль.
+Rule for next time: Если я беру помощь после честной попытки, я должен помечать это как assisted solve, а не как autonomous solve, и потом вернуться к паттерну позже в delayed recall без подсказок.
+Fact: Главная трудность была не в синтаксисе Python, а в том, чтобы понять, какие именно boundary rules должны существовать и где давать default, а где бросать InvalidFilterError.
+Taxonomy: [4. Boundary and validation error], [2. Modeling error]
+Why: Я ещё не автоматизировал паттерн “грязный вход → нормализованный выход → ошибка на плохом значении”.
+Rule for next time: Для каждого filter param я отдельно выписываю: тип, default, допустимые значения, и условие, при котором нужно кидать custom exception.
