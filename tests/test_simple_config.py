@@ -34,11 +34,11 @@ def test_get_settings_fail_missing_required_url(monkeypatch):
         SimpleConfig()
 
 
-def test_config_validation_fails(monkeypatch):
-    monkeypatch.setenv("APP_PORT","Martell")
-    monkeypatch.setenv("DATABASE_URL", "postgres://test") # заглушка, чтобы не упало из-за отсутствия базы
-    monkeypatch.setenv("SECRET_KEY", "change_this_in_production")
-    with pytest.raises(expected_exception = ValidationError):
-        SimpleConfig()
 
-
+def test_get_settings_fail_missing_required_url():
+    with pytest.raises(ValidationError):
+        SimpleConfig(
+            app_port=8080,
+            secret_key="change_this_in_production",
+            _env_file=None,
+        )

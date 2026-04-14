@@ -29,7 +29,7 @@ def test_get_settings_fail_missing_required_url(monkeypatch):
 
     # Этап 2: Проверяем, что при попытке создать конфиг будет выброшена ошибка ValidationError
     with pytest.raises(ValidationError):
-        raw = SimpleConfig()
+        raw = SimpleConfig(_env_file = None)
         app.config.build_database_config(raw)
 
 

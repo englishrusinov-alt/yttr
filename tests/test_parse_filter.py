@@ -1,6 +1,6 @@
 from app.exceptions import InvalidFilterError
 from app.filter_utils import parse_filter_params
-
+import pytest
 
 def test_parse_filter_params_success():
     params = {

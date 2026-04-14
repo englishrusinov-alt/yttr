@@ -381,3 +381,109 @@ Fact: Главная трудность была не в синтаксисе Py
 Taxonomy: [4. Boundary and validation error], [2. Modeling error]
 Why: Я ещё не автоматизировал паттерн “грязный вход → нормализованный выход → ошибка на плохом значении”.
 Rule for next time: Для каждого filter param я отдельно выписываю: тип, default, допустимые значения, и условие, при котором нужно кидать custom exception.
+
+T020
+
+WELL:
+
+Реализовал базовый SQLAlchemy-каркас для работы с БД: дошёл до идеи Base, engine и session management, а не застрял на абстрактной теории ORM. Это соответствует цели тикета: Create the SQLAlchemy base, engine, and session management.
+Добавил тест на создание engine и negative case на пустой database_url, то есть не ограничился happy path и реально проверил boundary для DB-конфигурации. Твой конфиг уже содержал database_url как обязательное поле, и ты использовал его как источник для T020.
+Правильно встроил современный PostgreSQL driver через psycopg в Poetry-зависимости проекта, а не начал обходить проблему случайными костылями. До этого в pyproject.toml у тебя драйвера Postgres не было.
+Главную архитектурную проблему ты в итоге исправил правильно: убрал создание settings/engine/session с верхнего уровня модуля и засунул это внутрь функций, после чего тесты перестали падать на этапе import/test collection. Это был правильный фикс по lifecycle, а не случайное “затыкание” ошибки.
+
+STRUGGLE:
+
+Fact: Я сначала разместил get_settings() и создание engine/session на верхнем уровне app/db.py, из-за чего pytest падал ещё во время импорта модуля с ValidationError на отсутствующие app_port, database_url, secret_key.
+Taxonomy: [5. State management error], [12. Operational blindness]
+Why: Я не учёл жизненный цикл модуля Python: код на module level выполняется сразу при импорте, а не “позже, когда понадобится”. Из-за этого boundary конфигурации сработал слишком рано.
+Rule for next time: Всё, что зависит от окружения, подключения к БД или runtime initialization, я не выношу на top-level без очень явной причины. Сначала спрашиваю: “это definition-time или runtime?”
+Fact: Я думал, что проблема может быть “в полях” или в PostgreSQL URL, хотя реальная причина была в import-time side effect внутри db.py.
+Taxonomy: [12. Operational blindness]
+Why: Я видел красный traceback на SimpleConfig, но сначала не выделил, что он возник не в тестовой логике, а из-за импорта модуля.
+Rule for next time: Если ошибка случается в test collection или прямо на import, я первым делом проверяю, какой код выполняется на верхнем уровне модуля.
+Fact: Я добавил Postgres driver и URL через postgresql+psycopg://..., но не сразу понимал, нужен ли это временный костыль или нормальный продовый путь.
+Taxonomy: [25. Dependency judgment], [12. Operational blindness]
+Why: У меня не было устойчивой модели различия между “PostgreSQL как СУБД” и “DBAPI driver как Python-адаптер для SQLAlchemy”.
+Rule for next time: Для работы SQLAlchemy с конкретной БД я отдельно проверяю: что является диалектом БД, а что является драйвером Python. Не путать postgresql и psycopg.
+Fact: Тест на engine я начал писать без ясного понимания, что именно нужно проверять: реальное подключение, URL, тип engine или поведение драйвера.
+Taxonomy: [11. Testing blindness], [12. Operational blindness]
+Why: Я ещё не автоматизировал правило, что unit test на create_engine() должен в первую очередь проверять корректную сборку Engine, а не обязательно живую доступность БД.
+Rule for next time: Для инфраструктурных factory-функций сначала тестирую shape/contract результата (Engine, URL parts, negative case), а интеграционное подключение отделяю в другой тест.
+
+
+T021
+
+WELL:
+
+Я реально довёл Alembic wiring до рабочего состояния: initial migration создалась, значит контур alembic -> env.py -> metadata -> database connection у меня в итоге заработал. Это уже не теория, а рабочий артефакт тикета. До этого в шаблоне Alembic у меня был target_metadata = None и фейковый sqlalchemy.url, то есть wiring из коробки не был реально подключён к проекту.
+Я разобрался, что Alembic нельзя запускать через системный apt-пакет, а нужно запускать через Poetry из корня проекта, чтобы использовать проектное окружение и зависимости. Это было правильное operational решение, потому что alembic уже был в зависимостях проекта.
+Я починил несколько разных слоёв проблем подряд:
+сначала config wiring,
+потом драйвер и URL,
+потом запуск Docker Postgres,
+потом .env.
+То есть я не бросил тикет на первой operational ошибке, а реально довёл его до результата.
+Я на практике понял одну из главных идей schema evolution: миграции живут не сами по себе, а зависят от корректного lifecycle-и окружения — metadata, URL, driver, доступности БД и валидного config source. Это как раз и есть полезная часть T021, а не просто команда alembic revision.
+
+STRUGGLE:
+
+Fact: Изначально Alembic-окружение было только шаблонно и не было реально связано с моим приложением: в alembic/env.py стоял target_metadata = None, а в alembic.ini — заглушечный driver://user:pass@localhost/dbname.
+Taxonomy: [3. Schema design error], [12. Operational blindness]
+Why: Я ещё не видел, что Alembic нужно не “просто установить”, а реально привязать к Base.metadata и рабочему database URL.
+Rule for next time: Когда беру migration tool, я первым делом проверяю две вещи: откуда он берёт metadata и откуда он берёт реальный DB URL.
+Fact: Я сначала заставил alembic/env.py тянуть get_settings().database_url, но этим же потянул весь SimpleConfig, из-за чего Alembic падал на обязательных полях конфига, которые вообще не нужны миграциям, включая secret_key. Это видно по ошибке ValidationError на app_port, database_url, secret_key, а потом отдельно на одном secret_key.
+Taxonomy: [12. Operational blindness], [5. State management error]
+Why: Я связал Alembic со всем приложением слишком сильно. Вместо “Alembic нужен только URL БД” я дал ему зависимость от полного runtime-config приложения.
+Rule for next time: Для migration tooling я подключаю только минимально необходимый config, а не весь application settings object.
+Fact: После создания реального .env у меня сломались старые negative-тесты на SimpleConfig, потому что BaseSettings начал находить значения из файла, даже когда я удалял env-переменные через monkeypatch.delenv(). Это проявилось в тестах, где ожидался ValidationError, но он больше не происходил.
+Taxonomy: [11. Testing blindness], [12. Operational blindness]
+Why: Я не учёл, что появление .env меняет модель тестирования BaseSettings: удаление env-переменной уже не гарантирует отсутствие значения.
+Rule for next time: Если у BaseSettings есть env_file, negative-тесты я пишу либо с _env_file=None, либо через явную инициализацию с пропущенным полем, а не воюю с внешней средой.
+Fact: Я несколько раз упирался в operational ошибки подключения к Postgres:
+сначала Alembic лез в 127.0.0.1:5432 и получал password authentication failed,
+хотя в compose у меня раньше был проброс 5433:5432,
+потом у меня была сломанная строка в .env, из-за которой имя БД склеилось с SECRET_KEY,
+только после этого initial migration реально сгенерировалась.
+Taxonomy: [12. Operational blindness], [25. Dependency judgment]
+Why: Я ещё не автоматизировал различие между:
+host-context vs docker-context,
+внутренним портом контейнера vs внешним портом хоста,
+DB dialect vs DBAPI driver,
+корректной .env строкой vs сломанной конфигурацией файла.
+Rule for next time: Если инфраструктурная команда падает, я первым делом проверяю 4 вещи: host, port, credentials, формат config-файла — до того, как начинаю подозревать библиотеку.
+Fact: Я сначала воспринимал ошибки Alembic как “что-то не так с Alembic”, хотя по факту большая часть проблем была не в самом migration tool, а в lifecycle проекта: settings, Docker, Postgres URL, driver и доступность базы.
+Taxonomy: [12. Operational blindness]
+Why: У меня ещё не было устойчивой mental model, что migration tool просто обнажает все слабые места project wiring.
+Rule for next time: Если migration tool падает, я не обвиняю сразу сам tool; я проверяю весь путь config -> URL -> driver -> DB availability -> metadata.
+
+T022
+
+WELL:
+
+Я реально довёл первую ORM-сущность до рабочего состояния: определил User с нужным смысловым минимумом — email, timestamps и is_active. Это соответствует задаче тикета: Define the User model with timestamps and activation fields.
+Я не остановился на одном классе, а дотащил связанный контур до конца: модель загрузилась, тесты прошли, и Alembic autogenerate в итоге увидел новую таблицу users и создал миграцию add user table. Это уже не декоративная модель, а реально включённая в schema evolution сущность.
+Я поймал и исправил проблему с duplicate table registration: сначала не понимал, что наследование от Base уже автоматически добавляет модель в Base.metadata, а потом разобрался и убрал ручное дублирование. Это важное понимание ORM lifecycle, а не просто синтаксическая правка.
+Я отделил то, что должно тестироваться на уровне Python-объекта, от того, что реально живёт на уровне БД и ORM metadata. Это помогло не требовать от модели того, что SQLAlchemy не обязан делать при простом User(...).
+
+STRUGGLE:
+
+Fact: Я сначала ожидал, что is_active будет сразу True на простом User(email="..."), но в текущем стиле SQLAlchemy ORM объект создавался с None, и тест падал.
+Taxonomy: [2. Modeling error], [11. Testing blindness]
+Why: Я смешал Python-конструктор объекта и database/ORM defaults. У меня ещё не было устойчивой модели, когда значение появляется сразу в объекте, а когда только при INSERT или flush.
+Rule for next time: Для ORM-моделей я отдельно различаю constructor-time behavior и database-time defaults. Если хочу тестировать default, сначала проверяю: это Python-level default или DB/ORM insert-time default?
+Fact: Я сначала сделал negative test, который ожидал TypeError на обычном User(email="test@example.com"), хотя это был тот же happy path, и он не должен был падать.
+Taxonomy: [11. Testing blindness]
+Why: Я ещё не выделил чётко, где у модели реально есть Python-level валидация, а где есть только DB-level constraints вроде nullable=False и unique=True.
+Rule for next time: Перед написанием negative test я сначала отвечаю себе: “на каком уровне вообще должен происходить fail — Python object creation, ORM flush, DB commit или constraint inspection?”
+Fact: У меня была маленькая, но блокирующая опечатка в поле nullable, из-за которой тесты падали ещё во время импорта модели.
+Taxonomy: [1. Syntax or API memory error]
+Why: При новой ORM-форме я ещё не автоматизировал точный API mapped_column(), и мелкая ошибка в keyword argument полностью ломала импорт.
+Rule for next time: После написания новой ORM-модели я сразу делаю короткий import smoke check или test collection run, чтобы быстро поймать API-level опечатки.
+Fact: При попытке сделать миграцию я получил ValueError: Duplicate table keys across multiple MetaData objects: "users", потому что добавил User в metadata отдельно, не понимая, что через наследование от Base он уже регистрируется автоматически. Потом, когда убрал дублирование, Alembic увидел Detected added table 'users' и сгенерировал миграцию.
+Taxonomy: [5. State management error], [12. Operational blindness]
+Why: Я ещё не до конца понимал, как работает declarative registration и что Base.metadata — единый реестр таблиц, а не место, куда нужно вручную “добавлять” модель после объявления класса.
+Rule for next time: Если модель наследуется от Base, я предполагаю, что она уже зарегистрирована в metadata автоматически, и сначала проверяю текущее состояние metadata, прежде чем что-то добавлять руками.
+Fact: Мне потребовалось время, чтобы понять, что для T022 negative case можно делать не только через runtime exception, но и через проверку shape/constraint модели, например nullable=False или unique=True, если я ещё не строю полноценный DB insert test.
+Taxonomy: [11. Testing blindness], [2. Modeling error]
+Why: Я слишком узко понимал negative case как “должно прямо упасть при создании объекта”, хотя у ORM-моделей часть негативных условий выражается через schema contract, а не через конструктор Python-класса.
+Rule for next time: Для entity design задач я отдельно выбираю, что именно проверяю: object shape, metadata constraints, migration diff или реальное DB behavior.

@@ -21,7 +21,7 @@ def test_get_settings_success(monkeypatch):
 def test_config_validation_fails(monkeypatch):
     monkeypatch.setenv("APP_PORT","Martell")
     with pytest.raises(expected_exception = ValidationError):
-        raw = SimpleConfig()
+        raw = SimpleConfig(_env_file = None)
         app.config.build_app_config(raw)
 
 
