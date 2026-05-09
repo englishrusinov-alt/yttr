@@ -12,3 +12,9 @@ def test_user_email_column_unique():
 
 def test_user_email_column_not_nullable():
     assert User.__table__.c.email.nullable is False
+
+def test_user_track_sort_order_column_not_nullable():
+    assert User.__table__.c.track_sort_order.nullable is False
+
+def test_user_lesson_track_id_column_not_nullable():
+    assert User.__table__.c.lesson_track_id.nullable is False

@@ -487,3 +487,871 @@ Fact: Мне потребовалось время, чтобы понять, ч�
 Taxonomy: [11. Testing blindness], [2. Modeling error]
 Why: Я слишком узко понимал negative case как “должно прямо упасть при создании объекта”, хотя у ORM-моделей часть негативных условий выражается через schema contract, а не через конструктор Python-класса.
 Rule for next time: Для entity design задач я отдельно выбираю, что именно проверяю: object shape, metadata constraints, migration diff или реальное DB behavior.
+
+
+
+T023 Postmortem — модели Track и Lesson + Alembic migration
+
+Что я пытался сделать:
+Мне нужно было определить модели Track и Lesson с полями ordering, publish-флагами, timestamps и связью lessons.track_id -> tracks.id.
+
+Что получилось:
+Модели Track и Lesson уже были определены в app/models.py.
+Alembic autogenerate корректно увидел две новые таблицы: tracks и lessons.
+После команды alembic upgrade head таблицы реально появились в PostgreSQL.
+Я вручную проверил схему через \dt, \d tracks и \d lessons.
+Я также проверил, что lessons.track_id имеет foreign key на tracks.id.
+
+Что пошло не так / где я запутался:
+Сначала я попытался создать новую миграцию, когда база данных ещё не была обновлена до последней существующей миграции.
+Alembic выдал ошибку: "Target database is not up to date."
+Ошибка была в том, что я перепутал существование migration-файлов с реальным состоянием базы данных.
+
+Вторая путаница:
+После команды alembic revision --autogenerate я сразу зашёл в PostgreSQL и ожидал увидеть таблицы tracks и lessons.
+Но revision --autogenerate только создаёт файл миграции.
+Он не применяет миграцию к базе.
+Таблицы появились только после команды alembic upgrade head.
+
+Категория ошибки:
+Ошибка schema evolution.
+Непонимание migration workflow.
+Путаница между состоянием кода, состоянием migration-файлов и состоянием реальной базы данных.
+
+Правильная ментальная модель:
+SQLAlchemy models описывают желаемую Python-side схему.
+Alembic revision --autogenerate создаёт migration-файл на основе изменений в моделях.
+Alembic upgrade head применяет migration-файлы к реальной базе данных.
+PostgreSQL меняется только после upgrade, а не после revision generation.
+
+Что я проверил:
+1. Успешно запустил alembic upgrade head.
+2. Проверил таблицы в PostgreSQL через \dt.
+3. Убедился, что users, tracks и lessons существуют.
+4. Проверил структуру таблиц через \d tracks и \d lessons.
+5. Убедился, что lessons.track_id ссылается на tracks.id.
+6. Проверил failure case: попытка вставить lesson с несуществующим track_id упала с foreign key error.
+7. Проверил happy path: создал track, потом создал lesson, привязанный к этому track.
+
+Правило на следующий раз:
+Перед созданием новой autogenerate-миграции всегда проверять, что база догнана до последней миграции:
+
+poetry run alembic current
+poetry run alembic heads
+poetry run alembic upgrade head
+
+Потом создавать миграцию:
+
+poetry run alembic revision --autogenerate -m "message"
+
+Потом вручную открыть и проверить migration-файл.
+
+Потом применить миграцию:
+
+poetry run alembic upgrade head
+
+Главный урок:
+Изменение модели — это ещё не изменение базы.
+Изменение базы происходит только после цепочки:
+model change -> migration file -> alembic upgrade head.
+
+T023 можно считать закрытым, потому что модели есть, миграция создана, миграция применена, схема проверена, foreign key работает, happy path и failure case проверены.
+
+
+T024 Postmortem — Task model + migration + schema verification
+
+Что я пытался сделать:
+Мне нужно было определить модель Task с типом задачи, сложностью, metadata-полем и связью с Lesson.
+Цель T024 была не просто написать модель, а провести полный schema workflow:
+model -> migration -> upgrade -> manual DB verification -> failure case -> happy path.
+
+Что получилось:
+Я создал модель Task и связал её с Lesson через lesson_id.
+Финальная модель Task содержит поля:
+- id
+- lesson_id
+- title
+- description
+- task_type
+- difficulty
+- metadata
+- sort_order
+- is_published
+- created_at
+- updated_at
+
+Я проверил, что SQLAlchemy правильно видит колонки модели через:
+
+poetry run python -c "from app.models import User, Track, Lesson, Task; print(Task.__table__.columns.keys())"
+
+Ожидаемый результат был получен:
+
+['id', 'lesson_id', 'title', 'description', 'task_type', 'difficulty', 'metadata', 'sort_order', 'is_published', 'created_at', 'updated_at']
+
+После этого я сбросил локальную dev-базу через:
+
+docker compose down -v
+docker compose up -d db
+
+Затем создал новую чистую миграцию:
+
+poetry run alembic revision --autogenerate -m "initial schema"
+
+Alembic увидел таблицы:
+- tracks
+- users
+- lessons
+- tasks
+
+Потом я применил миграцию:
+
+poetry run alembic upgrade head
+
+В PostgreSQL я проверил таблицы через:
+
+\dt
+
+И увидел:
+- alembic_version
+- users
+- tracks
+- lessons
+- tasks
+
+Failure case:
+Я попытался вставить task с lesson_id, которого не существует:
+
+INSERT INTO tasks (
+    lesson_id,
+    title,
+    description,
+    task_type,
+    difficulty,
+    metadata,
+    sort_order,
+    is_published
+)
+VALUES (
+    999999,
+    'Broken task',
+    'Should fail',
+    'text',
+    3,
+    NULL,
+    0,
+    false
+);
+
+Ожидаемо получил ошибку foreign key:
+
+ERROR: insert or update on table "tasks" violates foreign key constraint "tasks_lesson_id_fkey"
+DETAIL: Key (lesson_id)=(999999) is not present in table "lessons".
+
+Это подтвердило, что база не разрешает создать task без существующего lesson.
+
+Happy path:
+Я создал track:
+
+INSERT INTO tracks (title, description, sort_order, is_published)
+VALUES ('Python Backend', 'Main backend track', 0, false)
+RETURNING id;
+
+Потом создал lesson, привязанный к этому track:
+
+INSERT INTO lessons (track_id, title, content, sort_order, is_published)
+VALUES (1, 'SQLAlchemy models', 'Intro lesson', 0, false)
+RETURNING id;
+
+Потом создал task, привязанный к этому lesson:
+
+INSERT INTO tasks (
+    lesson_id,
+    title,
+    description,
+    task_type,
+    difficulty,
+    metadata,
+    sort_order,
+    is_published
+)
+VALUES (
+    1,
+    'Define a SQLAlchemy model',
+    'Create model and explain fields.',
+    'text',
+    3,
+    NULL,
+    0,
+    false
+);
+
+Insert прошёл успешно.
+
+Что пошло не так:
+Сначала я сделал ошибку в модели Task:
+после mapped_column у task_type стояла лишняя запятая.
+
+Из-за этого Python превратил поле task_type в tuple, а SQLAlchemy проигнорировал его как колонку.
+Раньше в логе было предупреждение:
+
+SAWarning: Ignoring declarative-like tuple value of attribute 'task_type'
+
+Также у меня была typo в названии поля:
+
+sort_oder
+
+вместо:
+
+sort_order
+
+Из-за этих ошибок Alembic создал неправильную миграцию: таблица tasks появилась без task_type и с неправильной колонкой sort_oder.
+
+Категория ошибки:
+Schema modeling error.
+Python syntax trap.
+Migration workflow error.
+Недостаточная проверка autogenerate migration перед применением.
+
+Правильная ментальная модель:
+SQLAlchemy видит только корректно объявленные mapped_column поля.
+Лишняя запятая после mapped_column превращает колонку в tuple, и ORM её не маппит.
+Alembic autogenerate не понимает мои намерения — он просто сравнивает то, что реально видит SQLAlchemy.
+Если модель неправильная, Alembic честно создаст неправильную миграцию.
+
+Главный урок:
+Перед созданием миграции надо проверять не только код глазами, но и реальный SQLAlchemy mapping:
+
+poetry run python -c "from app.models import Task; print(Task.__table__.columns.keys())"
+
+Если в этом списке нет нужной колонки, миграцию создавать рано.
+
+Ещё один урок:
+Миграцию нельзя применять вслепую.
+После alembic revision --autogenerate надо открыть migration-файл и проверить:
+- правильные имена колонок;
+- наличие foreign key;
+- отсутствие typo;
+- nullable / not nullable;
+- порядок создания таблиц.
+
+Что я сделал для исправления:
+Так как это локальный dev-проект и данные не были важны, я сбросил dev-базу и пересоздал чистую initial schema миграцию.
+Это допустимо в учебной локальной среде.
+В production/shared-среде так делать нельзя: там надо было бы писать новую corrective migration вперёд.
+
+Правило на следующий раз:
+1. Сначала исправить модель.
+2. Проверить SQLAlchemy mapping:
+
+poetry run python -c "from app.models import Task; print(Task.__table__.columns.keys())"
+
+3. Проверить, что база на актуальном head:
+
+poetry run alembic current
+poetry run alembic heads
+poetry run alembic upgrade head
+
+4. Создать миграцию:
+
+poetry run alembic revision --autogenerate -m "message"
+
+5. Открыть migration-файл глазами.
+6. Только потом применить:
+
+poetry run alembic upgrade head
+
+7. Проверить схему в psql.
+8. Проверить failure case.
+9. Проверить happy path.
+
+T024 считается закрытым, потому что:
+- модель Task создана;
+- Task связан с Lesson через foreign key;
+- task_type есть и сохраняется в базе;
+- difficulty есть;
+- metadata есть;
+- sort_order исправлен;
+- миграция создана и применена;
+- таблица tasks существует;
+- foreign key работает;
+- failure case с неправильным lesson_id падает;
+- happy path track -> lesson -> task проходит.
+T025 Postmortem — модели Attempt и Review + workflow state design
+
+Что я пытался сделать:
+Мне нужно было определить модели Attempt и Review.
+Цель T025 была не просто создать две таблицы, а смоделировать workflow:
+пользователь отправляет попытку решения task, а reviewer потом создаёт review с оценкой и feedback.
+
+Главная доменная модель:
+Task -> Attempt -> Review
+
+Attempt = попытка пользователя решить конкретный task.
+Review = результат проверки конкретной attempt.
+
+Что получилось:
+Я создал таблицы attempts и reviews.
+После миграции PostgreSQL показал таблицы:
+
+- users
+- tracks
+- lessons
+- tasks
+- attempts
+- reviews
+- alembic_version
+
+Это подтвердило, что миграция была применена к базе.
+
+Модель Attempt:
+- id
+- task_id
+- user_id
+- answer_text
+- status
+- metadata
+- submitted_at
+- created_at
+- updated_at
+
+Модель Review:
+- id
+- attempt_id
+- reviewer_id
+- score
+- feedback
+- created_at
+- updated_at
+
+Почему status не boolean:
+Сначала была идея думать через true/false, но для Attempt это плохая модель.
+Attempt — это workflow entity, а не простой флаг.
+
+Boolean может выразить только:
+true / false
+
+Но попытка может иметь несколько состояний:
+submitted
+in_review
+reviewed
+rejected
+
+Поэтому status лучше хранить как controlled string с CheckConstraint, а не как is_reviewed boolean.
+
+Какие constraints нужны и зачем:
+ForeignKey на attempts.task_id нужен, чтобы attempt не мог ссылаться на task, которого нет.
+ForeignKey на attempts.user_id нужен, чтобы attempt не мог принадлежать несуществующему user.
+ForeignKey на reviews.attempt_id нужен, чтобы review не мог ссылаться на attempt, которого нет.
+ForeignKey на reviews.reviewer_id нужен, чтобы review не мог быть создан от имени несуществующего reviewer.
+
+UniqueConstraint на reviews.attempt_id нужен не для связи, а для другого инварианта:
+один attempt может иметь только один final review.
+
+CheckConstraint на Attempt.status нужен, чтобы база не принимала мусорные статусы вроде done_bro.
+CheckConstraint на Review.score нужен, чтобы база не принимала score вне диапазона 0–100.
+
+Что пошло не так:
+Сначала в модели Review я снова допустил Python syntax trap:
+после mapped_column у id стояла лишняя запятая.
+
+Из-за этого SQLAlchemy воспринял id не как колонку, а как tuple.
+Лог показал предупреждение:
+
+SAWarning: Ignoring declarative-like tuple value of attribute 'id'
+
+Потом SQLAlchemy упал с ошибкой:
+
+Mapper Mapper[Review(reviews)] could not assemble any primary key columns for mapped table 'reviews'
+
+Причина:
+Review оказался без primary key, потому что id был проигнорирован.
+
+Категория ошибки:
+Python syntax trap.
+ORM mapping error.
+Schema modeling error.
+Недостаточная предварительная проверка модели перед Alembic autogenerate.
+
+Как я исправил:
+Я убрал лишнюю запятую после mapped_column(primary_key=True).
+После этого проверил SQLAlchemy mapping перед миграцией.
+
+Правильная проверка перед Alembic:
+
+poetry run python -c "from app.models import Attempt, Review; print(Attempt.__table__.columns.keys()); print(Review.__table__.columns.keys())"
+
+Главный урок:
+Перед созданием миграции нужно проверять, что SQLAlchemy реально видит все колонки.
+Если ORM mapping неправильный, Alembic создаст неправильную миграцию или упадёт до её создания.
+
+Что я проверил после миграции:
+1. Проверил, что таблицы attempts и reviews появились в PostgreSQL.
+2. Проверил failure case: attempt с несуществующим task_id падает по foreign key.
+3. Проверил failure case: attempt с несуществующим user_id должен падать по foreign key.
+4. Проверил, что invalid status надо тестировать только с валидными task_id и user_id.
+5. Проверил happy path: существующий task + существующий user -> attempt.
+6. Проверил happy path: существующий attempt + reviewer -> review.
+7. Проверил, что если использовать неправильный task_id, база падает раньше, чем доходит до проверки status.
+
+Важная ошибка во время проверки:
+Я пытался создать attempt с task_id = 1, но в базе существующий task имел id = 2.
+
+PostgreSQL правильно вернул:
+
+Key (task_id)=(1) is not present in table "tasks".
+
+Это не ошибка модели.
+Это означало, что я использовал несуществующий task_id.
+После SELECT id, title FROM tasks; я увидел реальный task_id и использовал его.
+
+Правило для проверки failure cases:
+Когда я проверяю один конкретный failure case, все остальные поля должны быть валидными.
+
+Например:
+Если я проверяю invalid status, то task_id и user_id должны существовать.
+Иначе база сначала упадёт по foreign key, и я не проверю status constraint.
+
+Правильная ментальная модель:
+ForeignKey защищает существование связанной строки.
+UniqueConstraint защищает уникальность бизнес-отношения.
+CheckConstraint защищает допустимый диапазон или набор значений.
+nullable=False защищает от отсутствия значения, но не защищает от мусорного значения.
+
+Пример:
+score INTEGER NOT NULL запрещает NULL, но разрешает 999.
+score INTEGER + CheckConstraint(score BETWEEN 0 AND 100) запрещает 999.
+
+Что я должен делать в следующих schema tickets:
+1. Сначала вывести инварианты домена.
+2. Потом определить поля.
+3. Потом решить nullable / not nullable.
+4. Потом добавить FK, unique и check constraints.
+5. Потом проверить ORM mapping.
+6. Потом создать Alembic migration.
+7. Потом открыть migration-файл глазами.
+8. Потом применить migration.
+9. Потом проверить схему в psql.
+10. Потом проверить failure cases и happy path.
+
+T025 считается закрытым, потому что:
+- Attempt model создан.
+- Review model создан.
+- attempts и reviews появились в базе.
+- Attempt связан с Task и User.
+- Review связан с Attempt и reviewer User.
+- Workflow status смоделирован не через boolean, а через state.
+- Foreign key failure cases проверены.
+- Happy path attempt -> review прошёл.
+- Ошибка с лишней запятой была найдена, понята и исправлена.
+
+Да, **в идеале это пишется тестами**.
+
+Но сейчас у тебя этап **schema modeling / migration verification**, поэтому ручной SQL — это временный smoke-check:
+
+```text
+модель -> миграция -> база реально защищает инварианты
+```
+
+Позже, когда дойдёшь до repositories / test fixtures, эти проверки надо перенести в pytest/integration tests. То есть:
+
+```text
+Сейчас:
+ручной SQL в psql = быстрая проверка схемы
+
+Позже:
+pytest + real test DB = автоматическая проверка
+```
+
+Строго по DoD: T026 у тебя закрыт по **model/migration/schema/failure cases**, но automated test ещё pending. Это нормально на текущем этапе, но не надо забывать. В backlog acceptance для тикетов действительно требует test/postmortem, так что позже эти SQL checks надо превратить в тесты. 
+
+Копируй postmortem:
+
+
+T026 Postmortem — Progress and Notification models + derived state design
+
+Что я пытался сделать:
+Мне нужно было определить модели Progress и Notification.
+Цель T026 была не просто добавить две таблицы, а смоделировать derived state:
+Progress хранит вычисляемое состояние пользователя по lesson, а Notification хранит сообщения для пользователя.
+
+Главная доменная модель:
+Progress = состояние пользователя по конкретному lesson.
+Notification = уведомление, адресованное конкретному user.
+
+Что получилось:
+Я создал модели Progress и Notification.
+После миграции PostgreSQL показал новые таблицы:
+- progress
+- notifications
+
+Это подтвердило, что миграция была применена к базе.
+
+Модель Progress:
+- id
+- user_id
+- lesson_id
+- status
+- completion_percent
+- mastery_score
+- last_activity_at
+- completed_at
+- metadata
+- created_at
+- updated_at
+
+Модель Notification:
+- id
+- user_id
+- kind
+- title
+- body
+- payload
+- is_read
+- read_at
+- created_at
+- updated_at
+
+Почему Progress не стал XP/rank/achievements:
+Сначала я думал о progress как об XP, rank, achievements и gamification.
+Но для T026 правильнее сузить Progress до derived state:
+user + lesson -> status / completion_percent / mastery_score.
+
+XP, rank, achievements, streaks и level — это отдельный gamification layer, который надо добавлять позже.
+Сейчас Progress должен быть простой материализованной сводкой по прохождению lesson.
+
+Почему Progress связан с Lesson, а не Track:
+Progress по Track можно позже посчитать из lesson progress.
+Если сразу делать progress по Track, Lesson и Task одновременно, схема станет сложнее раньше времени.
+Поэтому на T026 выбран минимальный полезный уровень:
+User + Lesson.
+
+Какие constraints были добавлены:
+1. UniqueConstraint(user_id, lesson_id)
+   Один пользователь не должен иметь две progress-записи на один lesson.
+
+2. CheckConstraint на status:
+   status должен быть только одним из:
+   not_started
+   in_progress
+   completed
+
+3. CheckConstraint на completion_percent:
+   completion_percent должен быть от 0 до 100.
+
+4. CheckConstraint на mastery_score:
+   mastery_score должен быть от 0 до 100.
+
+5. CheckConstraint на notification kind:
+   kind должен быть только одним из:
+   review_completed
+   progress_updated
+   system
+
+Почему composite unique, а не отдельные unique:
+Сначала можно ошибочно сделать UniqueConstraint только на user_id или только на lesson_id.
+Но это неправильно.
+
+Unique(user_id) означал бы:
+один user может иметь только одну progress-запись вообще.
+
+Unique(lesson_id) означал бы:
+один lesson может иметь только одну progress-запись вообще.
+
+Правильный инвариант:
+один user может иметь только один progress на один конкретный lesson.
+
+Поэтому нужен:
+UniqueConstraint("user_id", "lesson_id")
+
+Почему completed_at nullable:
+completed_at не должен автоматически заполняться при создании progress.
+Если progress ещё не completed, completed_at должен быть NULL.
+Иначе система будет считать lesson завершённым сразу после создания progress.
+
+Почему Notification.payload сделан JSON:
+payload хранит структурированные данные, например:
+attempt_id
+lesson_id
+score
+
+Это не просто текст, поэтому JSON лучше Text.
+
+Что я проверил:
+1. Проверил, что таблицы progress и notifications появились через \dt.
+2. Проверил структуру progress через \d progress.
+3. Проверил структуру notifications через \d notifications.
+4. Проверил happy path для progress.
+5. Проверил failure case для progress с несуществующим user_id.
+6. Проверил failure case для progress с несуществующим lesson_id.
+7. Проверил failure case для invalid progress status.
+8. Проверил failure case для completion_percent вне диапазона 0–100.
+9. Проверил failure case для mastery_score вне диапазона 0–100.
+10. Проверил duplicate progress на тот же user_id + lesson_id.
+11. Проверил happy path для notification.
+12. Проверил failure case для notification с несуществующим user_id.
+13. Проверил failure case для invalid notification kind.
+
+Что пошло не так / что было важно понять:
+Я сначала думал о Progress слишком широко — как об XP, ranks и achievements.
+Но это было бы преждевременное расширение.
+Правильное решение для T026 — хранить минимальный derived state по lesson.
+
+Также важно было не спутать разные типы constraints:
+ForeignKey защищает существование связанной строки.
+UniqueConstraint защищает уникальность бизнес-отношения.
+CheckConstraint защищает допустимые значения.
+nullable=False защищает от отсутствия значения, но не от мусорного значения.
+
+Категория ошибки / риска:
+Derived state design risk.
+Premature gamification risk.
+Schema constraint modeling risk.
+Риск усложнить модель раньше времени.
+
+Правильная ментальная модель:
+Progress не является source of truth.
+Source of truth — это tasks, attempts и reviews.
+Progress — это derived/materialized state, который позже будет обновляться через ProgressService.
+
+Notification тоже пока не workflow engine.
+Это простая таблица сообщений для пользователя.
+Background jobs, delivery status, retries и notification service будут позже.
+
+Что отложено:
+- XP
+- rank
+- achievements
+- streaks
+- level system
+- ProgressService
+- NotificationService
+- background jobs
+- frontend notification UI
+- автоматический recalculation progress
+- notification enqueue logic
+
+Test status:
+На этом этапе я сделал manual SQL verification через psql.
+Это проверило, что база реально применяет foreign keys, unique constraints и check constraints.
+
+Но полноценный automated pytest test ещё не написан.
+Позже, когда появятся repository layer и test DB fixtures, эти SQL checks надо перенести в integration tests.
+
+Правило на следующий раз:
+1. Сначала понять, является ли таблица source of truth или derived state.
+2. Не добавлять gamification раньше времени.
+3. Для progress выбирать минимальный уровень агрегации.
+4. Для уникальности бизнес-отношений использовать composite unique.
+5. Перед миграцией проверять ORM mapping.
+6. После миграции проверять \d table.
+7. Для каждого constraint делать отдельный failure case.
+8. Когда появится test harness, переносить ручные SQL checks в pytest.
+
+T026 считается закрытым по schema/migration/manual verification, потому что:
+- Progress model создан.
+- Notification model создан.
+- progress и notifications появились в базе.
+- Progress связан с User и Lesson.
+- Notification связан с User.
+- Progress имеет status, completion_percent и mastery_score constraints.
+- Progress имеет unique constraint на user_id + lesson_id.
+- Notification имеет kind constraint.
+- Happy paths проверены.
+- Failure cases проверены.
+- Automated pytest test помечен как pending для repository/test-fixture этапа.
+
+
+T027 Postmortem — AuditLog and IdempotencyKey models + operational state design
+
+Что я пытался сделать:
+Мне нужно было определить модели AuditLog и IdempotencyKey.
+Цель T027 была не просто добавить две таблицы, а смоделировать operational state:
+AuditLog хранит историю важных действий в системе.
+IdempotencyKey защищает систему от повторного выполнения одной и той же операции.
+
+Главная доменная идея:
+AuditLog = кто, что, когда сделал и над какой сущностью.
+IdempotencyKey = ключ, который не даёт повторному request создать дубликат операции.
+
+Что получилось:
+Я создал модели AuditLog и IdempotencyKey.
+После миграции PostgreSQL показал новые таблицы:
+- audit_logs
+- idempotency_keys
+
+Это подтвердило, что миграция была применена к базе.
+
+Модель AuditLog:
+- id
+- actor_user_id
+- action
+- entity_type
+- entity_id
+- metadata
+- created_at
+
+Модель IdempotencyKey:
+- id
+- user_id
+- key
+- operation
+- status
+- response_body
+- created_at
+- updated_at
+- expires_at
+
+Почему AuditLog не является обычным app log:
+Обычные application logs нужны для debugging и observability.
+AuditLog нужен для бизнес- и security-истории:
+кто сделал важное действие, когда сделал, над какой сущностью и с какими данными.
+
+Почему actor_user_id nullable:
+Не каждое событие создаётся пользователем.
+Некоторые события могут быть системными:
+- system.progress_recalculated
+- background job created notification
+- cleanup expired idempotency keys
+
+Поэтому actor_user_id должен быть nullable.
+AuditLog с actor_user_id = NULL — это валидный system event.
+
+Почему action NOT NULL:
+AuditLog без action бесполезен.
+Если неизвестно, что произошло, запись не имеет смысла.
+Поэтому action должен быть обязательным.
+
+Почему entity_type и entity_id nullable:
+Не каждое audit-событие обязательно привязано к конкретной бизнес-сущности.
+Но когда привязка есть, можно хранить:
+entity_type = "attempt"
+entity_id = 12
+
+или:
+entity_type = "user"
+entity_id = 5
+
+Почему IdempotencyKey нужен:
+Если клиент повторит один и тот же request из-за сетевого лага, retry или двойного клика, система может случайно создать дубликат.
+Например:
+один submit attempt может создать две attempts.
+
+IdempotencyKey защищает от этого:
+один user + один key + одна operation должны выполняться только один раз.
+
+Почему unique constraint именно на user_id + key + operation:
+Просто key сам по себе может совпасть у разных пользователей.
+operation тоже важна, потому что один и тот же key может теоретически использоваться для разных типов операций.
+
+Правильный инвариант:
+один пользователь не может повторно использовать тот же key для той же operation.
+
+Поэтому нужен:
+UniqueConstraint("user_id", "key", "operation")
+
+Почему status не boolean:
+IdempotencyKey — это маленький workflow.
+У него больше двух состояний:
+- processing
+- completed
+- failed
+
+Boolean не выразил бы это нормально.
+Поэтому status хранится как controlled string с CheckConstraint.
+
+Какие constraints были добавлены:
+1. ForeignKey на audit_logs.actor_user_id -> users.id
+   AuditLog не может ссылаться на несуществующего actor user.
+
+2. NOT NULL на audit_logs.action
+   AuditLog без action запрещён.
+
+3. ForeignKey на idempotency_keys.user_id -> users.id
+   IdempotencyKey не может принадлежать несуществующему user.
+
+4. UniqueConstraint на idempotency_keys(user_id, key, operation)
+   Один и тот же пользователь не может повторить тот же idempotency key для той же operation.
+
+5. CheckConstraint на idempotency_keys.status
+   status может быть только:
+   processing
+   completed
+   failed
+
+Что я проверил:
+1. Проверил, что таблицы audit_logs и idempotency_keys появились через \dt.
+2. Проверил структуру audit_logs через \d audit_logs.
+3. Проверил структуру idempotency_keys через \d idempotency_keys.
+4. Проверил AuditLog happy path: system event с actor_user_id = NULL проходит.
+5. Проверил AuditLog failure case: actor_user_id с несуществующим user_id падает по foreign key.
+6. Проверил AuditLog failure case: action = NULL падает по NOT NULL.
+7. Проверил IdempotencyKey happy path: валидный key создаётся.
+8. Проверил IdempotencyKey failure case: duplicate user_id + key + operation падает по unique constraint.
+9. Проверил IdempotencyKey failure case: invalid status падает по check constraint.
+10. Проверил IdempotencyKey failure case: несуществующий user_id падает по foreign key.
+
+Что пошло не так / что было важно понять:
+Сначала я воспринимал AuditLog как обычные логи для моделей.
+Но AuditLog — это не Python logging и не structlog.
+Это отдельная таблица для важных бизнес/безопасность событий.
+
+Также важно было понять, что IdempotencyKey — это не просто random key.
+Это operational protection от duplicate submit / retry / повторного выполнения операции.
+
+Категория риска:
+Operational state design risk.
+Duplicate operation risk.
+Auditability risk.
+Workflow state modeling risk.
+
+Правильная ментальная модель:
+AuditLog отвечает на вопросы:
+- кто сделал?
+- что сделал?
+- над чем сделал?
+- когда сделал?
+- какие дополнительные данные были?
+
+IdempotencyKey отвечает на вопрос:
+- выполнялась ли уже эта операция с этим ключом для этого пользователя?
+
+Что отложено:
+- AuditService
+- автоматическая запись audit events
+- request IP / user-agent
+- middleware для idempotency key
+- actual duplicate-submit logic
+- retry behavior
+- cleanup expired idempotency keys
+- связывание idempotency key с HTTP headers
+- полноценные repository/service tests
+
+Test status:
+На этом этапе я сделал manual SQL verification через psql.
+Это подтвердило, что база реально применяет foreign keys, unique constraint, check constraint и NOT NULL.
+
+Automated pytest integration tests пока не написаны.
+Позже, когда появятся repository layer и test DB fixtures, эти SQL checks надо перенести в pytest.
+
+Правило на следующий раз:
+1. Сначала определить: это domain state или operational state.
+2. Для audit log не путать application logs и persistent audit history.
+3. Для idempotency всегда определить scope уникальности.
+4. Для workflow status не использовать boolean, если состояний больше двух.
+5. Перед миграцией проверять ORM mapping.
+6. После миграции проверять \d table.
+7. Для каждого constraint делать отдельный failure case.
+8. Когда появится test harness, переносить ручные SQL checks в pytest.
+
+T027 считается закрытым по schema/migration/manual verification, потому что:
+- AuditLog model создан.
+- IdempotencyKey model создан.
+- audit_logs и idempotency_keys появились в базе.
+- AuditLog поддерживает system events через actor_user_id = NULL.
+- AuditLog action защищён NOT NULL.
+- IdempotencyKey связан с User.
+- IdempotencyKey имеет unique constraint на user_id + key + operation.
+- IdempotencyKey имеет status constraint.
+- Happy paths проверены.
+- Failure cases проверены.
+- Automated pytest test помечен как pending для repository/test-fixture этапа.

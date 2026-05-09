@@ -7,7 +7,7 @@ from sqlalchemy.orm import DeclarativeBase
 
 from app.config import get_settings
 from app.db import Base
-from app.models import User
+from app.models import User, Track, Lesson , Task , Attempt , Review
 
 # this is the Alembic Config object, which provides
 # access to the values within the .ini file in use.
