@@ -1355,3 +1355,191 @@ T027 считается закрытым по schema/migration/manual verificati
 - Happy paths проверены.
 - Failure cases проверены.
 - Automated pytest test помечен как pending для repository/test-fixture этапа.
+
+T030 Postmortem — UserRepository + PostgreSQL integration tests
+
+Что я пытался сделать:
+Мне нужно было написать UserRepository с методами:
+- get_by_id
+- get_by_email
+- create
+- update
+
+Цель T030 была не просто сделать функции для User, а впервые отделить слой работы с БД от ORM-модели.
+Model описывает таблицу.
+Repository описывает операции чтения и записи через SQLAlchemy Session.
+
+Главная архитектурная идея:
+User model = структура таблицы users.
+UserRepository = слой доступа к данным для users.
+
+Что получилось:
+Я создал отдельный repository layer, а не стал писать методы прямо в models.py.
+Для UserRepository были реализованы методы:
+- get_by_id(user_id)
+- get_by_email(email)
+- create(email, is_active)
+- update(user, **fields)
+
+Repository принимает SQLAlchemy Session через constructor.
+Это правильно, потому что session lifecycle должен контролироваться снаружи: service layer, use case или test.
+
+Почему repository не должен делать commit:
+Repository должен делать DB-операцию, но не должен решать границы транзакции.
+Внутри repository допустимы:
+- session.add(...)
+- session.flush()
+- session.refresh(...)
+
+Но commit должен быть снаружи.
+
+Причина:
+Позже одна бизнес-операция может включать несколько действий:
+- create attempt
+- update progress
+- create notification
+- write audit log
+
+И всё это должно коммититься одной транзакцией.
+Если каждый repository сам делает commit, транзакционная целостность развалится.
+
+Что я проверил:
+Я написал PostgreSQL integration tests для UserRepository.
+Тесты проверили:
+1. create user
+2. get user by id
+3. get user by email
+4. get_by_id возвращает None для несуществующего user
+5. get_by_email возвращает None для несуществующего email
+6. update user
+7. update запрещает неизвестное поле
+
+Negative cases:
+1. get_by_id для missing id возвращает None.
+2. get_by_email для missing email возвращает None.
+3. update с неизвестным полем, например password_hash, падает с ValueError.
+
+Почему я выбрал PostgreSQL, а не SQLite:
+SQLite in-memory проще, но он не полностью повторяет PostgreSQL.
+Так как проект реально использует PostgreSQL, repository tests лучше гонять на настоящей test database.
+Это ближе к production behavior и ловит больше реальных проблем.
+
+Что было сделано для test DB:
+Я создал отдельную базу:
+ytter_test_db
+
+И добавил TEST_DATABASE_URL только для тестового запуска.
+Важное правило:
+TEST_DATABASE_URL не должен лежать в обычном .env как runtime app config.
+Это test-only config.
+
+Что пошло не так:
+После добавления TEST_DATABASE_URL сломались старые config-тесты.
+SimpleConfig начал видеть test_database_url и падал с ошибкой:
+
+Extra inputs are not permitted
+
+Причина:
+Я смешал runtime application config и test-only config.
+SimpleConfig не должен знать про TEST_DATABASE_URL, потому что это не настройка приложения, а настройка test harness.
+
+Как я исправил:
+Я вынес TEST_DATABASE_URL из обычного .env / runtime config.
+Для запуска тестов начал экспортировать его через shell или setup.sh.
+Также config tests были изолированы от .env через _env_file=None, чтобы тесты не зависели от внешнего окружения.
+
+Вторая проблема:
+Repository tests сначала падали, потому что TEST_DATABASE_URL не был задан.
+Ошибка была в fixture test_database_url.
+
+Правильное поведение:
+Если TEST_DATABASE_URL не задан, тест должен явно сказать:
+TEST_DATABASE_URL is not set
+
+Это лучше, чем молчаливый fail.
+
+Третья проблема:
+После фикса repository tests и config tests остались 2 падения в tests/test_models.py.
+
+Тесты проверяли:
+
+User.__table__.c.track_sort_order
+User.__table__.c.lesson_track_id
+
+Но это неправильная модель.
+У User не должно быть track_sort_order или lesson_track_id.
+sort_order принадлежит Track.
+track_id принадлежит Lesson.
+
+Правильные проверки:
+Track.__table__.c.sort_order.nullable is False
+Lesson.__table__.c.track_id.nullable is False
+
+Это была ошибка старого теста, а не ошибка моделей.
+
+Категории ошибок:
+1. Config boundary error.
+2. Test environment pollution.
+3. Runtime config vs test-only config confusion.
+4. Stale tests after schema changes.
+5. Repository abstraction learning.
+6. Transaction boundary design.
+
+Правильная ментальная модель:
+Runtime app config — это то, что нужно приложению для запуска.
+Test-only config — это то, что нужно test harness.
+Их нельзя бездумно смешивать.
+
+Repository не владеет транзакцией.
+Repository работает внутри переданной Session.
+Service/use case/test решает, когда commit или rollback.
+
+PostgreSQL integration tests должны использовать отдельную test database.
+Нельзя гонять destructive tests против dev/prod database.
+
+Что я сделал хорошо:
+1. Не положил repository в models.py.
+2. Создал отдельный слой app/repositories.
+3. Сделал UserRepository с явным Session dependency.
+4. Не стал делать commit внутри repository.
+5. Написал integration tests на реальном PostgreSQL.
+6. Добавил negative cases.
+7. Починил конфликт runtime config и test config.
+8. Починил устаревшие model tests.
+9. Довёл полный test run до зелёного состояния.
+
+Что отложено:
+- service layer
+- transaction orchestration на уровне use case
+- generic BaseRepository
+- pagination
+- soft delete
+- domain-specific UserService
+- auth/password logic
+- PostgreSQL test database lifecycle automation
+- CI test database setup
+
+Что я должен делать дальше:
+1. Для каждого repository писать tests на real PostgreSQL test DB.
+2. Не использовать SQLite, если нужно проверить реальное DB behavior.
+3. Не класть test-only переменные в runtime .env.
+4. Не делать commit внутри repository.
+5. После schema/model changes проверять, не устарели ли старые tests.
+6. Перед full test run разделять ошибки по классам:
+   - config
+   - repository
+   - model tests
+   - DB connection
+   - migration
+7. Постепенно переносить manual SQL checks из прошлых тикетов в automated pytest integration tests.
+
+T030 считается закрытым, потому что:
+- UserRepository создан.
+- get_by_id работает.
+- get_by_email работает.
+- create работает.
+- update работает.
+- negative cases проверены.
+- PostgreSQL integration tests написаны.
+- test DB используется отдельно от dev DB.
+- полный test run стал зелёным.
