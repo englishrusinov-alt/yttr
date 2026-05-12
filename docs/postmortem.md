@@ -1543,3 +1543,27 @@ T030 считается закрытым, потому что:
 - PostgreSQL integration tests написаны.
 - test DB используется отдельно от dev DB.
 - полный test run стал зелёным.
+
+T031 — TrackRepository и LessonRepository basics
+
+WELL:
+
+Я реализовал базовые repository-методы для Track и Lesson: create, get by id, get by title, update.
+Я исправил copy-paste ошибку из UserRepository и начал работать с правильными ORM-моделями.
+Я добавил happy-path и negative-path тесты: missing entity возвращает None, неизвестное поле в update даёт ValueError.
+Я понял, что Lesson не существует отдельно от Track, и начал передавать track_id при создании lesson.
+
+STRUGGLE:
+
+Fact: Сначала я пытался создавать Lesson без track_id.
+Taxonomy: [3. Schema design error], [4. Boundary and validation error]
+Why: Я воспринимал Lesson как самостоятельную сущность, хотя по схеме это дочерняя запись, завязанная на Track.
+Rule for next time: Перед написанием repository для модели я сначала проверяю её обязательные foreign keys и только потом пишу create() contract.
+Fact: В update() я сначала делал setattr(Track/Lesson, field_name, value) вместо изменения конкретного объекта.
+Taxonomy: [5. State management error], [1. Syntax/API memory error]
+Why: Я перепутал ORM-класс и ORM-instance.
+Rule for next time: В repository update всегда мутируется переданный объект (track, lesson, user), а не класс модели (Track, Lesson, User).
+Fact: Часть тестов я обновил не сразу после изменения сигнатуры LessonRepository.create(track_id, ...).
+Taxonomy: [11. Testing blindness], [10. Serialization or contract error]
+Why: Я изменил production contract, но не синхронизировал все тесты с новым контрактом.
+Rule for next time: После изменения сигнатуры метода я прохожу поиском по всем вызовам этого метода и обновляю каждый тестовый сценарий.
